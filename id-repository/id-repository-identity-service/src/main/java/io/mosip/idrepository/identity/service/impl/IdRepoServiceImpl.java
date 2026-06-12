@@ -565,6 +565,12 @@ public class IdRepoServiceImpl implements IdRepoService<IdRequestDTO, Uin> {
 				uinObject.setUpdatedBy(IdRepoSecurityManager.getUser());
 				uinObject.setUpdatedDateTime(DateUtils.getUTCCurrentDateTime());
 
+				// Extract and persist remark
+				String remark = extractRemark(mapper.convertValue(requestDTO.getIdentity(), ObjectNode.class));
+				if (remark != null) {
+					uinObject.setRemark(remark);
+				}
+
 				if (Objects.nonNull(requestDTO.getDocuments()) && !requestDTO.getDocuments().isEmpty()) {
 					updateDocuments(uinHashWithSalt, uinObject, requestDTO, false);
 					anonymousProfileHelper
@@ -588,7 +594,7 @@ public class IdRepoServiceImpl implements IdRepoService<IdRequestDTO, Uin> {
 					uinObject.getUin(), uinObject.getUinHash(), uinObject.getUinData(), uinObject.getUinDataHash(),
 					uinObject.getRegId(), uinObject.getStatusCode(), IdRepoSecurityManager.getUser(),
 					DateUtils.getUTCCurrentDateTime(), IdRepoSecurityManager.getUser(),
-					DateUtils.getUTCCurrentDateTime(), false, null,uinObject.getPart1(),uinObject.getPart2(),uinObject.getPart3(),uinObject.getPart4()));
+					DateUtils.getUTCCurrentDateTime(), false, null,uinObject.getPart1(),uinObject.getPart2(),uinObject.getPart3(),uinObject.getPart4(), uinObject.getRemark()));
 
 			issueCredential(uinObject.getUin(), uinHashWithSalt, uinObject.getStatusCode(),
 					DateUtils.getUTCCurrentDateTime(), uinObject.getRegId());
@@ -604,7 +610,21 @@ public class IdRepoServiceImpl implements IdRepoService<IdRequestDTO, Uin> {
 		}
 	}
 
-	
+	private String extractRemark(ObjectNode identityObject) {
+		try {
+			JsonNode remarkArray = identityObject.get("remark");
+			if (remarkArray != null && remarkArray.isArray() && remarkArray.size() > 0) {
+				String remarkValue = remarkArray.get(0).path("value").asText(null);
+				if (StringUtils.isNotBlank(remarkValue)) {
+					return remarkValue;
+				}
+			}
+		} catch (Exception e) {
+			mosipLogger.warn(IdRepoSecurityManager.getUser(), ID_REPO_SERVICE_IMPL,
+					"extractRemark", "Could not extract remark: " + e.getMessage());
+		}
+		return null;
+	}
 
 	private void saveCardDetails(RequestDTO requestDTO) {
 		ObjectNode identityObject = mapper.convertValue(requestDTO.getIdentity(), ObjectNode.class);
