@@ -10,8 +10,11 @@ import static io.mosip.idrepository.core.constant.IdRepoErrorConstants.FILE_STOR
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
@@ -19,11 +22,14 @@ import org.springframework.stereotype.Component;
 
 import com.amazonaws.services.s3.model.AmazonS3Exception;
 
+import io.mosip.commons.khazana.dto.ObjectDto;
 import io.mosip.commons.khazana.spi.ObjectStoreAdapter;
 import io.mosip.idrepository.core.constant.IdRepoErrorConstants;
 import io.mosip.idrepository.core.exception.IdRepoAppException;
+import io.mosip.idrepository.core.logger.IdRepoLogger;
 import io.mosip.idrepository.core.security.IdRepoSecurityManager;
 import io.mosip.kernel.core.fsadapter.exception.FSAdapterException;
+import io.mosip.kernel.core.logger.spi.Logger;
 
 /**
  * @author Manoj SP
@@ -56,6 +62,16 @@ public class ObjectStoreHelper {
 	@Value("${" + OBJECT_STORE_ADAPTER_NAME + "}")
 	private String objectStoreAdapterName;
 	
+	/**
+	 * Same flag the S3 adapter uses. When true the bucket is the account name and
+	 * the object key is container/source/process/objectName, which is the only
+	 * layout in which a UIN folder can be listed through the adapter.
+	 */
+	@Value("${object.store.s3.use.account.as.bucketname:false}")
+	private boolean useAccountAsBucketName;
+
+	private static final Logger mosipLogger = IdRepoLogger.getLogger(ObjectStoreHelper.class);
+
 	private ObjectStoreAdapter objectStore;
 
 	@Autowired
@@ -97,6 +113,35 @@ public class ObjectStoreHelper {
 		return getObject(uinHash, true, fileRefId, bioDataRefId);
 	}
 	
+	/**
+	 * Lists every object stored under the UIN hash folder of the object store,
+	 * for all file types (Demographics and Biometrics). Callers must filter the
+	 * result by {@link ObjectDto#getSource()} / {@link ObjectDto#getProcess()}.
+	 *
+	 * Returns an empty list when listing is not possible (adapter not using the
+	 * account as bucket name, or the object store is not reachable), so that
+	 * retrieval of the current documents is never affected.
+	 *
+	 * @param uinHash the uin hash folder name
+	 * @return the objects found, or an empty list
+	 */
+	public List<ObjectDto> listUinObjects(String uinHash) {
+		if (!useAccountAsBucketName) {
+			mosipLogger.warn(IdRepoSecurityManager.getUser(), "ObjectStoreHelper", "listUinObjects",
+					"Listing UIN folder is supported only when object.store.s3.use.account.as.bucketname=true");
+			return Collections.emptyList();
+		}
+		try {
+			String prefix = StringUtils.isBlank(objectStoreBucketName) ? uinHash : objectStoreBucketName + SLASH + uinHash;
+			List<ObjectDto> objects = objectStore.getAllObjects(objectStoreAccountName, prefix);
+			return objects == null ? Collections.emptyList() : objects;
+		} catch (RuntimeException e) {
+			mosipLogger.error(IdRepoSecurityManager.getUser(), "ObjectStoreHelper", "listUinObjects",
+					"Unable to list objects of UIN folder: " + e.getMessage());
+			return Collections.emptyList();
+		}
+	}
+
 	public void deleteBiometricObject(String uinHash, String fileRefId) {
 		if (this.biometricObjectExists(uinHash, fileRefId)) {
 			String objectName = uinHash + SLASH + BIOMETRICS + SLASH + fileRefId;
