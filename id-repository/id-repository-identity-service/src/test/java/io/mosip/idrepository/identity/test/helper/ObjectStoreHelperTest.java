@@ -4,10 +4,14 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
+import java.util.Collections;
+import java.util.Date;
+import java.util.List;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -27,6 +31,7 @@ import org.springframework.web.context.WebApplicationContext;
 
 import com.amazonaws.services.s3.model.AmazonS3Exception;
 
+import io.mosip.commons.khazana.dto.ObjectDto;
 import io.mosip.commons.khazana.spi.ObjectStoreAdapter;
 import io.mosip.idrepository.core.constant.IdRepoErrorConstants;
 import io.mosip.idrepository.core.exception.IdRepoAppException;
@@ -172,6 +177,44 @@ public class ObjectStoreHelperTest {
 	public void testDeleteBiometricObjectNotExists() throws IdRepoAppException {
 		when(adapter.exists(any(), any(), any(), any(), any())).thenReturn(Boolean.FALSE);
 		helper.deleteBiometricObject("hash", "refId");
+	}
+
+	@Test
+	public void testListUinObjectsWhenAccountIsNotBucket() {
+		ReflectionTestUtils.setField(helper, "useAccountAsBucketName", false);
+		assertTrue(helper.listUinObjects("hash").isEmpty());
+		verify(adapter, never()).getAllObjects(any(), any());
+	}
+
+	@Test
+	public void testListUinObjectsWithoutContainerPrefix() {
+		ReflectionTestUtils.setField(helper, "useAccountAsBucketName", true);
+		ReflectionTestUtils.setField(helper, "objectStoreAccountName", "idrepo");
+		ReflectionTestUtils.setField(helper, "objectStoreBucketName", "");
+		ObjectDto dto = new ObjectDto("Demographics", null, "file1.pdf", new Date());
+		when(adapter.getAllObjects("idrepo", "hash")).thenReturn(Collections.singletonList(dto));
+		List<ObjectDto> result = helper.listUinObjects("hash");
+		assertEquals(1, result.size());
+		assertEquals("file1.pdf", result.get(0).getObjectName());
+	}
+
+	@Test
+	public void testListUinObjectsWithContainerPrefix() {
+		ReflectionTestUtils.setField(helper, "useAccountAsBucketName", true);
+		ReflectionTestUtils.setField(helper, "objectStoreAccountName", "idrepo");
+		ReflectionTestUtils.setField(helper, "objectStoreBucketName", "idrepository");
+		when(adapter.getAllObjects("idrepo", "idrepository/hash")).thenReturn(Collections.emptyList());
+		assertTrue(helper.listUinObjects("hash").isEmpty());
+		verify(adapter).getAllObjects("idrepo", "idrepository/hash");
+	}
+
+	@Test
+	public void testListUinObjectsReturnsEmptyOnAdapterFailure() {
+		ReflectionTestUtils.setField(helper, "useAccountAsBucketName", true);
+		ReflectionTestUtils.setField(helper, "objectStoreAccountName", "idrepo");
+		ReflectionTestUtils.setField(helper, "objectStoreBucketName", "");
+		when(adapter.getAllObjects(any(), any())).thenThrow(new AmazonS3Exception(""));
+		assertTrue(helper.listUinObjects("hash").isEmpty());
 	}
 
 }

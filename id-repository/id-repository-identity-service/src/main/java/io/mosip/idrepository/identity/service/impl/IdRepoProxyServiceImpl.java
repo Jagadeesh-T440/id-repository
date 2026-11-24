@@ -29,7 +29,10 @@ import static io.mosip.idrepository.core.constant.IdRepoErrorConstants.RECORD_EX
 
 import java.io.IOException;
 import java.text.ParseException;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -37,6 +40,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
@@ -58,6 +62,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import io.mosip.commons.khazana.dto.ObjectDto;
 import io.mosip.idrepository.core.builder.RestRequestBuilder;
 import io.mosip.idrepository.core.constant.EventType;
 import io.mosip.idrepository.core.constant.IDAEventType;
@@ -85,6 +90,7 @@ import io.mosip.idrepository.core.spi.IdRepoService;
 import io.mosip.idrepository.core.util.EnvUtil;
 import io.mosip.idrepository.identity.entity.CardDetail;
 import io.mosip.idrepository.identity.entity.Uin;
+import io.mosip.idrepository.identity.entity.UinDocument;
 import io.mosip.idrepository.identity.helper.IdRepoServiceHelper;
 import io.mosip.idrepository.identity.helper.ObjectStoreHelper;
 import io.mosip.idrepository.identity.repository.CardDetailRepository;
@@ -198,6 +204,20 @@ public class IdRepoProxyServiceImpl implements IdRepoService<IdRequestDTO, IdRes
 
 	@Value("${mosip.idrepo.dob.format}")
 	private String dobFormat;
+
+	/**
+	 * When true, retrieving demographic documents (type demo/all) also returns the
+	 * older files found in the UIN's Demographics folder in the object store, in
+	 * addition to the currently mapped documents.
+	 */
+	@Value("${mosip.idrepo.demographic.include-all-files:false}")
+	private boolean includeAllDemographicFiles;
+
+	/** Maximum number of older demographic files returned per request. */
+	@Value("${mosip.idrepo.demographic.max-older-files:100}")
+	private long maxOlderDemographicFiles;
+
+	private static final String HISTORY_CATEGORY_PREFIX = "HISTORY|";
 
 	private static final String INUGANDA = "In Uganda";
 
@@ -404,6 +424,51 @@ public class IdRepoProxyServiceImpl implements IdRepoService<IdRequestDTO, IdRes
 	 * @return the demographic files
 	 */
 	private void getDemographicFiles(Uin uinObject, List<DocumentsDTO> documents) {
+		getCurrentDemographicFiles(uinObject, documents);
+		if (includeAllDemographicFiles) {
+			getOlderDemographicFiles(uinObject, documents);
+		}
+	}
+
+	/**
+	 * Adds the demographic files that are present in the UIN's Demographics folder
+	 * of the object store but are not the current files mapped in the database
+	 * (documents replaced by later updates). These have no document category
+	 * stored anywhere, so the category is returned as
+	 * <code>HISTORY|&lt;last modified UTC&gt;|&lt;file name&gt;</code>, newest
+	 * first. A file that cannot be read is skipped so the current documents are
+	 * still returned.
+	 *
+	 * @param uinObject the uin object
+	 * @param documents the documents
+	 */
+	private void getOlderDemographicFiles(Uin uinObject, List<DocumentsDTO> documents) {
+		String uinHash = uinObject.getUinHash().split("_")[1];
+		Set<String> currentFiles = uinObject.getDocuments().stream().map(UinDocument::getDocId)
+				.collect(Collectors.toSet());
+		DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
+		objectStoreHelper.listUinObjects(uinHash).stream()
+				.filter(obj -> DEMOGRAPHICS.equals(obj.getSource()) || DEMOGRAPHICS.equals(obj.getProcess()))
+				.filter(obj -> StringUtils.isNotBlank(obj.getObjectName())
+						&& !currentFiles.contains(obj.getObjectName()))
+				.sorted(Comparator.comparing(ObjectDto::getLastModified,
+						Comparator.nullsLast(Comparator.reverseOrder())))
+				.limit(maxOlderDemographicFiles).forEach(obj -> {
+					try {
+						byte[] data = objectStoreHelper.getDemographicObject(uinHash, obj.getObjectName());
+						String modified = Objects.nonNull(obj.getLastModified())
+								? formatter.format(obj.getLastModified().toInstant())
+								: "";
+						documents.add(new DocumentsDTO(HISTORY_CATEGORY_PREFIX + modified + "|" + obj.getObjectName(),
+								CryptoUtil.encodeToURLSafeBase64(data)));
+					} catch (IdRepoAppException e) {
+						mosipLogger.warn(IdRepoSecurityManager.getUser(), ID_REPO_SERVICE_IMPL, GET_FILES,
+								"Skipping older demographic file " + obj.getObjectName() + ": " + e.getMessage());
+					}
+				});
+	}
+
+	private void getCurrentDemographicFiles(Uin uinObject, List<DocumentsDTO> documents) {
 		uinObject.getDocuments().stream().forEach(demo -> {
 			try {
 				String uinHash = uinObject.getUinHash().split("_")[1];
