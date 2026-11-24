@@ -10,6 +10,7 @@ import static io.mosip.idrepository.core.constant.IdRepoErrorConstants.FILE_STOR
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -20,7 +21,16 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
 
+import com.amazonaws.ClientConfiguration;
+import com.amazonaws.auth.AWSStaticCredentialsProvider;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.client.builder.AwsClientBuilder.EndpointConfiguration;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.AmazonS3Exception;
+import com.amazonaws.services.s3.model.ListObjectsV2Request;
+import com.amazonaws.services.s3.model.ListObjectsV2Result;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
 
 import io.mosip.commons.khazana.dto.ObjectDto;
 import io.mosip.commons.khazana.spi.ObjectStoreAdapter;
@@ -70,6 +80,29 @@ public class ObjectStoreHelper {
 	@Value("${object.store.s3.use.account.as.bucketname:false}")
 	private boolean useAccountAsBucketName;
 
+	/**
+	 * Same S3 settings the Khazana S3 adapter reads. They are needed only to list
+	 * a UIN folder by key prefix when the account is not used as the bucket name,
+	 * because the adapter cannot list by prefix in that layout (it lists the whole
+	 * bucket).
+	 */
+	@Value("${object.store.s3.url:}")
+	private String s3Url;
+
+	@Value("${object.store.s3.region:}")
+	private String s3Region;
+
+	@Value("${object.store.s3.accesskey:}")
+	private String s3AccessKey;
+
+	@Value("${object.store.s3.secretkey:}")
+	private String s3SecretKey;
+
+	@Value("${object.store.s3.bucket-name-prefix:}")
+	private String s3BucketNamePrefix;
+
+	private volatile AmazonS3 listingClient;
+
 	private static final Logger mosipLogger = IdRepoLogger.getLogger(ObjectStoreHelper.class);
 
 	private ObjectStoreAdapter objectStore;
@@ -114,32 +147,85 @@ public class ObjectStoreHelper {
 	}
 	
 	/**
-	 * Lists every object stored under the UIN hash folder of the object store,
-	 * for all file types (Demographics and Biometrics). Callers must filter the
-	 * result by {@link ObjectDto#getSource()} / {@link ObjectDto#getProcess()}.
+	 * Lists the objects stored under the UIN hash folder of the object store.
+	 * With use.account.as.bucketname=true every file type under the folder is
+	 * returned; otherwise only the Demographics folder is listed. Callers must
+	 * filter the result by {@link ObjectDto#getSource()} /
+	 * {@link ObjectDto#getProcess()}.
 	 *
-	 * Returns an empty list when listing is not possible (adapter not using the
-	 * account as bucket name, or the object store is not reachable), so that
+	 * Returns an empty list when the object store cannot be listed, so that
 	 * retrieval of the current documents is never affected.
 	 *
 	 * @param uinHash the uin hash folder name
 	 * @return the objects found, or an empty list
 	 */
 	public List<ObjectDto> listUinObjects(String uinHash) {
-		if (!useAccountAsBucketName) {
-			mosipLogger.warn(IdRepoSecurityManager.getUser(), "ObjectStoreHelper", "listUinObjects",
-					"Listing UIN folder is supported only when object.store.s3.use.account.as.bucketname=true");
-			return Collections.emptyList();
-		}
 		try {
-			String prefix = StringUtils.isBlank(objectStoreBucketName) ? uinHash : objectStoreBucketName + SLASH + uinHash;
-			List<ObjectDto> objects = objectStore.getAllObjects(objectStoreAccountName, prefix);
-			return objects == null ? Collections.emptyList() : objects;
+			if (useAccountAsBucketName) {
+				String prefix = StringUtils.isBlank(objectStoreBucketName) ? uinHash
+						: objectStoreBucketName + SLASH + uinHash;
+				List<ObjectDto> objects = objectStore.getAllObjects(objectStoreAccountName, prefix);
+				return objects == null ? Collections.emptyList() : objects;
+			}
+			return listUinFolderByPrefix(uinHash);
 		} catch (RuntimeException e) {
 			mosipLogger.error(IdRepoSecurityManager.getUser(), "ObjectStoreHelper", "listUinObjects",
 					"Unable to list objects of UIN folder: " + e.getMessage());
 			return Collections.emptyList();
 		}
+	}
+
+	/**
+	 * Lists the Demographics folder of a UIN when objects are stored in a bucket
+	 * named after the container (use.account.as.bucketname=false), where the key is
+	 * <code>uinHash/Demographics/fileRefId</code>. Only that prefix is listed, so
+	 * the cost does not depend on the size of the bucket.
+	 */
+	private List<ObjectDto> listUinFolderByPrefix(String uinHash) {
+		String bucket = getListingBucketName();
+		String prefix = uinHash + SLASH + DEMOGRAPHICS + SLASH;
+		AmazonS3 client = getListingClient();
+		List<ObjectDto> objects = new ArrayList<>();
+		ListObjectsV2Request request = new ListObjectsV2Request().withBucketName(bucket).withPrefix(prefix);
+		ListObjectsV2Result result;
+		do {
+			result = client.listObjectsV2(request);
+			for (S3ObjectSummary summary : result.getObjectSummaries()) {
+				String name = summary.getKey().substring(prefix.length());
+				if (!name.isEmpty() && !name.contains(SLASH)) {
+					objects.add(new ObjectDto(uinHash, DEMOGRAPHICS, name, summary.getLastModified()));
+				}
+			}
+			request.setContinuationToken(result.getNextContinuationToken());
+		} while (result.isTruncated());
+		return objects;
+	}
+
+	/** Bucket name built the same way as the Khazana S3 adapter does. */
+	private String getListingBucketName() {
+		String bucket = objectStoreBucketName;
+		if (StringUtils.isNotEmpty(s3BucketNamePrefix) && !bucket.startsWith(s3BucketNamePrefix)) {
+			bucket = s3BucketNamePrefix + bucket;
+		}
+		return bucket.toLowerCase();
+	}
+
+	private AmazonS3 getListingClient() {
+		AmazonS3 client = listingClient;
+		if (client == null) {
+			synchronized (this) {
+				client = listingClient;
+				if (client == null) {
+					client = AmazonS3ClientBuilder.standard()
+							.withCredentials(new AWSStaticCredentialsProvider(
+									new BasicAWSCredentials(s3AccessKey, s3SecretKey)))
+							.enablePathStyleAccess().withClientConfiguration(new ClientConfiguration())
+							.withEndpointConfiguration(new EndpointConfiguration(s3Url, s3Region)).build();
+					listingClient = client;
+				}
+			}
+		}
+		return client;
 	}
 
 	public void deleteBiometricObject(String uinHash, String fileRefId) {
