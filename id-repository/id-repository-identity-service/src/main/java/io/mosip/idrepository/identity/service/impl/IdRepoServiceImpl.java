@@ -12,18 +12,25 @@ import static io.mosip.idrepository.core.constant.IdRepoErrorConstants.NO_RECORD
 import static io.mosip.idrepository.core.constant.IdRepoErrorConstants.UNKNOWN_ERROR;
 import static io.mosip.idrepository.core.constant.IdRepoErrorConstants.UPDATE_COUNT_LIMIT_EXCEEDED;
 
-import java.util.*;
 import java.io.IOException;
 import java.sql.Date;
 import java.time.LocalDateTime;
-import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Map.Entry;
-
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import javax.annotation.Resource;
-import io.mosip.idrepository.identity.constant.MappingJsonConstants;
+
 import org.apache.commons.lang3.RegExUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
@@ -1266,5 +1273,19 @@ public class IdRepoServiceImpl implements IdRepoService<IdRequestDTO, Uin> {
 
 	private String getFileRefId(JsonNode docType) {
 		return UUID.randomUUID().toString() + DOT + docType.get(FILE_FORMAT_ATTRIBUTE).asText();
+	}
+
+	protected void saveDocumentHistory(UinDocument doc) {
+		LocalDateTime now = DateUtils.getUTCCurrentDateTime();
+		uinDocHRepo.save(new UinDocumentHistory(doc.getUinRefId(), now, doc.getDoccatCode(), doc.getDoctypCode(),
+				doc.getDocId(), doc.getDocName(), doc.getDocfmtCode(), doc.getDocHash(), "",
+				IdRepoSecurityManager.getUser(), now, null, null, false, null));
+	}
+
+	protected void saveBiometricHistory(UinBiometric bio) {
+		LocalDateTime now = DateUtils.getUTCCurrentDateTime();
+		uinBioHRepo.save(new UinBiometricHistory(bio.getUinRefId(), now, bio.getBioFileId(), bio.getBiometricFileType(),
+				bio.getBiometricFileName(), bio.getBiometricFileHash(), "", IdRepoSecurityManager.getUser(), now, null,
+				null, false, null));
 	}
 }
